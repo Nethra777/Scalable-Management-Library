@@ -1,0 +1,135 @@
+from flask import Flask, request, jsonify, Blueprint
+from flask_sqlalchemy import SQLAlchemy
+from flask_migrate import Migrate
+from flask_cors import CORS
+from marshmallow import Schema, fields, ValidationError
+import logging
+
+# Initialize Flask App
+app = Flask(__name__)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///users.db'
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+# Initialize Extensions
+db = SQLAlchemy(app)
+migrate = Migrate(app, db)
+CORS(app)  # Enable CORS for all routes
+
+# Configure Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# User Blueprint
+user_bp = Blueprint('user', __name__)
+
+# User Model
+class User(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(50), unique=True, nullable=False)
+    email = db.Column(db.String(100), unique=True, nullable=False)
+
+# Schema for Input Validation
+class UserSchema(Schema):
+    username = fields.String(required=True, validate=lambda x: len(x) > 0)
+    email = fields.Email(required=True)
+
+user_schema = UserSchema()
+
+# Route to add a new user
+@user_bp.route('/add_user', methods=['POST'])
+def add_user():
+    try:
+        data = user_schema.load(request.get_json())  # Validate input
+        if User.query.filter_by(username=data['username']).first():
+            return jsonify({'error': 'Username already exists'}), 409
+        
+        new_user = User(username=data['username'], email=data['email'])
+        db.session.add(new_user)
+        db.session.commit()
+        logger.info(f"User {data['username']} added successfully")
+        return jsonify({'message': 'User added successfully'}), 201
+
+    except ValidationError as err:
+        return jsonify({'error': err.messages}), 400
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error adding user: {str(e)}")
+        return jsonify({'error': 'Database error'}), 500
+
+# Route to get all users (with pagination)
+@user_bp.route('/get_users', methods=['GET'])
+def get_users():
+    page = request.args.get('page', 1, type=int)
+    per_page = request.args.get('per_page', 5, type=int)
+    
+    users = User.query.paginate(page=page, per_page=per_page, error_out=False)
+    if not users.items:
+        return jsonify({'message': 'No users found'}), 404
+    
+    users_list = [{'id': user.id, 'username': user.username, 'email': user.email} for user in users.items]
+    return jsonify({
+        'users': users_list,
+        'total_users': users.total,
+        'pages': users.pages,
+        'current_page': users.page
+    }), 200
+
+# Route to get a single user by ID
+@user_bp.route('/get_user/<int:user_id>', methods=['GET'])
+def get_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+    
+    return jsonify({'id': user.id, 'username': user.username, 'email': user.email}), 200
+
+# Route to delete a user by ID
+@user_bp.route('/delete_user/<int:user_id>', methods=['DELETE'])
+def delete_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    try:
+        db.session.delete(user)
+        db.session.commit()
+        logger.info(f"User {user.username} deleted successfully")
+        return jsonify({'message': 'User deleted successfully'}), 200
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error deleting user: {str(e)}")
+        return jsonify({'error': 'Database error'}), 500
+
+# Route to update user details
+@user_bp.route('/update_user/<int:user_id>', methods=['PUT'])
+def update_user(user_id):
+    user = User.query.get(user_id)
+    if not user:
+        return jsonify({'error': 'User not found'}), 404
+
+    try:
+        data = user_schema.load(request.get_json())  # Validate input
+        if 'username' in data and User.query.filter_by(username=data['username']).first():
+            return jsonify({'error': 'Username already exists'}), 409
+        
+        user.username = data.get('username', user.username)
+        user.email = data.get('email', user.email)
+        
+        db.session.commit()
+        logger.info(f"User {user_id} updated successfully")
+        return jsonify({'message': 'User updated successfully'}), 200
+
+    except ValidationError as err:
+        return jsonify({'error': err.messages}), 400
+    except Exception as e:
+        db.session.rollback()
+        logger.error(f"Error updating user: {str(e)}")
+        return jsonify({'error': 'Database error'}), 500
+
+# Register Blueprint
+app.register_blueprint(user_bp, url_prefix='/users')
+
+if __name__ == '__main__':
+    with app.app_context():
+        db.create_all()  # Ensure tables are created
+    app.run(debug=True)
